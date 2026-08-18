@@ -1,0 +1,59 @@
+# VisionSuite - Python 3.9+
+# Core dependencies (required to run the app).
+#
+# NOTE: mediapipe>=1.0 uses the modern Tasks API (mediapipe.tasks). The legacy
+# mediapipe.solutions API was removed in 1.0, so versions below 1.0 are NOT
+# compatible with this codebase. All MediaPipe backends use the Tasks API and
+# auto-download the small .task model bundles into models/ on first use.
+PySide6>=6.6.0
+opencv-python>=4.9.0
+numpy>=1.26.0
+mediapipe>=1.0.0
+ultralytics>=8.2.0
+torch>=2.2.0
+matplotlib>=3.8.0
+pyzbar>=0.1.9
+pytesseract>=0.3.10
+onnxruntime>=1.17.0
+psutil>=5.9.0
+reportlab>=4.0.0
+openpyxl>=3.1.0
+
+# ANPR / License-plate OCR — used by Live & Video Number Plate Recognition.
+# Primary OCR backend for challenging / Indian plates (auto-downloads its
+# models into ~/.EasyOCR on first use). Without it the engine falls back to
+# Tesseract (if a tesseract binary is installed).
+easyocr>=1.7.0
+
+# --- Local PostgreSQL persistent storage ----------------------------------
+# VisionSuite uses a LOCAL PostgreSQL database (localhost:5432) for persistent
+# storage of faces, vehicles, plates, detections, OCR, sessions, settings and
+# logs. Configure via a .env file (see .env.example). If PostgreSQL is not
+# running, VisionSuite degrades gracefully and keeps using in-memory/SQLite.
+SQLAlchemy>=2.0.0
+psycopg[binary]>=3.1.0
+python-dotenv>=1.0.0
+
+# Dedicated license-plate detection model (ANPR)
+# A separate YOLOv8n fine-tuned for the `license_plate` class is auto-downloaded
+# on first ANPR launch into models/license_plate/plate_detector_yolov8n.pt from
+# https://huggingface.co/Koushim/yolov8-license-plate-detection/resolve/main/best.pt
+# (public, non-gated, MIT). No extra pip package is required beyond ultralytics.
+
+# ---------------------------------------------------------------------------
+# Optional AI upgrades — install these to unlock the matching modules.
+# Each feature degrades gracefully (reports "unavailable") when its optional
+# dependency or model is missing, so the app still runs without them.
+# ---------------------------------------------------------------------------
+
+# Face recognition (identity DB) — enables the Face Recognition module.
+face-recognition>=1.3.0
+
+# Vehicle tracking & counting — ByteTrack tracker (optional, uses YOLO).
+# pip install bytetrack
+
+# Plant disease classifier weights (optional, downloaded on demand).
+# ---
+# Install everything from the optional section with:
+#   pip install -r requirements.txt     # core only
+#   pip install face-recognition easyocr bytetrack
