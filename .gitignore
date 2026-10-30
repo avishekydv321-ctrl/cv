@@ -48,3 +48,8 @@ coverage/
 *.pem
 .cache/
 .vercel
+
+# Auto-downloaded face recognition models
+/models/face_detection_yunet_2023mar.onnx
+/models/face_recognition_sface_2021dec.onnx
+/data/visionsuite_api.db

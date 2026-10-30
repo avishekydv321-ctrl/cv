@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Settings, Server, Key } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { HealthResponse, ModelsResponse } from "@/lib/types";

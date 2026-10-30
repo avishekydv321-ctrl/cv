@@ -220,7 +220,10 @@ class _TasksFaceDetector:
         if face_path is not None:
             try:
                 options = FaceDetectorOptions(
-                    base_options=BaseOptions(model_asset_path=str(face_path)),
+                    base_options=BaseOptions(
+                        model_asset_path=str(face_path),
+                        delegate=BaseOptions.Delegate.CPU,
+                    ),
                     running_mode=RunningMode.IMAGE,
                     min_detection_confidence=0.5,
                 )
@@ -286,7 +289,10 @@ class FaceDetector:
         if face_path is not None:
             try:
                 options = FaceDetectorOptions(
-                    base_options=BaseOptions(model_asset_path=str(face_path)),
+                    base_options=BaseOptions(
+                        model_asset_path=str(face_path),
+                        delegate=BaseOptions.Delegate.CPU,
+                    ),
                     running_mode=RunningMode.IMAGE,
                     min_detection_confidence=0.5,
                 )
@@ -298,7 +304,10 @@ class FaceDetector:
         if landmark_path is not None:
             try:
                 options = FaceLandmarkerOptions(
-                    base_options=BaseOptions(model_asset_path=str(landmark_path)),
+                    base_options=BaseOptions(
+                        model_asset_path=str(landmark_path),
+                        delegate=BaseOptions.Delegate.CPU,
+                    ),
                     running_mode=RunningMode.IMAGE,
                     num_faces=4,
                     output_face_blendshapes=False,
@@ -409,7 +418,10 @@ class _TasksHandLandmarker:
         if hand_path is not None:
             try:
                 options = HandLandmarkerOptions(
-                    base_options=BaseOptions(model_asset_path=str(hand_path)),
+                    base_options=BaseOptions(
+                        model_asset_path=str(hand_path),
+                        delegate=BaseOptions.Delegate.CPU,
+                    ),
                     running_mode=RunningMode.IMAGE,
                     num_hands=2,
                 )
@@ -457,7 +469,10 @@ class HandTracker:
         if hand_path is not None:
             try:
                 options = HandLandmarkerOptions(
-                    base_options=BaseOptions(model_asset_path=str(hand_path)),
+                    base_options=BaseOptions(
+                        model_asset_path=str(hand_path),
+                        delegate=BaseOptions.Delegate.CPU,
+                    ),
                     running_mode=RunningMode.IMAGE,
                     num_hands=2,
                 )

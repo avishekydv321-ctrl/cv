@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from server.core.config import settings
 from server.core.logging import configure_logging
 from server.api import api_router
+from server.services.database import init_db
 
 configure_logging()
 logger = logging.getLogger("main")
@@ -64,6 +65,8 @@ async def startup_event():
     logger.info("VisionSuite backend starting up...")
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+    if not init_db():
+        logger.warning("Database schema initialization failed; API will run without persistence")
 
 
 @app.on_event("shutdown")

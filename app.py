@@ -196,6 +196,10 @@ class VisionWorker(QObject):
             except Exception as exc:  # never let one bad frame kill the app
                 log.exception("Frame processing error")
                 self.status.emit(f"Frame error: {exc}")
+            if self.config.source == "image":
+                self._running = False
+                self.status.emit("Image recognition complete")
+                break
 
     def _process(self, frame: np.ndarray) -> FrameResult:
         self.frame_index += 1
@@ -209,6 +213,7 @@ class VisionWorker(QObject):
         if config.image_filter != "None":
             frame = apply_filter(frame, config.image_filter)
 
+        analysis_frame = frame.copy()
         detections: list[Detection] = []
         info: dict[str, Any] = {}
         alerts: list[str] = []
@@ -270,11 +275,26 @@ class VisionWorker(QObject):
         for key in active_modules:
             try:
                 module = self._module_for(key)
-                result = module._run(frame, config)
+                result = module._run(analysis_frame, config)
             except Exception as exc:  # a broken module must never stop the loop
                 log.exception("Module %s integration error", key)
                 continue
 
+            if key == "face_recognition" and result.detections:
+                for identity in result.detections:
+                    ix1, iy1, ix2, iy2 = identity.box
+                    identity_area = max(1, (ix2 - ix1) * (iy2 - iy1))
+                    detections[:] = [
+                        existing for existing in detections
+                        if existing.source != "face"
+                        or max(
+                            0,
+                            min(ix2, existing.box[2]) - max(ix1, existing.box[0]),
+                        ) * max(
+                            0,
+                            min(iy2, existing.box[3]) - max(iy1, existing.box[1]),
+                        ) / identity_area < 0.5
+                    ]
             detections.extend(result.detections)
             module_times[key] = result.inference_ms
             alerts.extend(result.alerts)

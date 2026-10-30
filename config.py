@@ -89,11 +89,15 @@ class AppConfig:
     fps_limit: int = 0
     # Set of active base modes. Multiple modes can run simultaneously and are
     # merged in the pipeline. Defaults to the first mode in MODES.
-    enabled_modes: set[str] = field(default_factory=lambda: {"Objects"})
+    enabled_modes: set[str] = field(default_factory=lambda: {"Faces", "Hands"})
     # Set of enabled AI module identifiers (see AI_MODULES above).
-    enabled_modules: set[str] = field(default_factory=set)
+    enabled_modules: set[str] = field(
+        default_factory=lambda: {"face_recognition", "sign_language"}
+    )
     # Confidence thresholds per feature (labels given on the GUI).
     module_confidences: dict[str, float] = field(default_factory=dict)
+    face_similarity_threshold: float = 0.45
+    face_history_enabled: bool = False
     # Emission latency (seconds) for real-time alerts (fire/smoke/unknown face).
     alert_cooldown: float = 3.0
 

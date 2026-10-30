@@ -21,7 +21,7 @@ from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot, QPropertyAnimation
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
-    QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow,
+    QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QSlider, QSplitter, QStackedWidget,
     QStatusBar, QTextEdit, QVBoxLayout, QWidget, QSystemTrayIcon, QStyle,
     QTableWidget, QTableWidgetItem, QHeaderView, QStyleFactory
@@ -154,8 +154,23 @@ class SettingsDialog(QDialog):
         self.attendance_check.setChecked(config.attendance_mode)
         self.tracking_check = QCheckBox("Native Object Tracking")
         self.tracking_check.setChecked(config.tracking_enabled)
+        self.face_history_check = QCheckBox("Store face recognition history")
+        self.face_history_check.setChecked(config.face_history_enabled)
+        self.face_threshold_label = QLabel(
+            f"Face match threshold: {config.face_similarity_threshold:.2f}"
+        )
+        self.face_threshold_slider = QSlider(Qt.Orientation.Horizontal)
+        self.face_threshold_slider.setRange(25, 75)
+        self.face_threshold_slider.setValue(round(config.face_similarity_threshold * 100))
+        self.face_threshold_slider.valueChanged.connect(
+            lambda value: self.face_threshold_label.setText(
+                f"Face match threshold: {value / 100:.2f}"
+            )
+        )
 
-        for c in (self.monitor_check, self.analytics_check, self.fps_check, self.attendance_check, self.tracking_check):
+        for c in (self.monitor_check, self.analytics_check, self.fps_check,
+                  self.attendance_check, self.tracking_check, self.face_history_check,
+                  self.face_threshold_label, self.face_threshold_slider):
             perf.addWidget(c)
         layout.addWidget(perf_box)
 
@@ -250,6 +265,8 @@ class SettingsDialog(QDialog):
 
     def _apply(self) -> None:
         self.config.source = self.source_combo.currentText()
+        if self.parent() is not None and hasattr(self.parent(), "source_combo"):
+            self.parent().source_combo.setCurrentText(self.config.source)
         self.config.ip_url = self.ip_edit.text().strip()
         self.config.media_path = self.media_edit.text().strip()
         self.config.system_monitor = self.monitor_check.isChecked()
@@ -257,6 +274,8 @@ class SettingsDialog(QDialog):
         self.config.show_fps = self.fps_check.isChecked()
         self.config.attendance_mode = self.attendance_check.isChecked()
         self.config.tracking_enabled = self.tracking_check.isChecked()
+        self.config.face_history_enabled = self.face_history_check.isChecked()
+        self.config.face_similarity_threshold = self.face_threshold_slider.value() / 100.0
 
         # Preprocessing enhancement parameters
         self.config.sharpening = self.chk_sharp.isChecked()
@@ -480,6 +499,172 @@ class AnalyticsDialog(QDialog):
             parent.statusBar().showMessage(msg, 4000)
 
 
+class FaceEnrollmentWorker(QThread):
+    def __init__(self, db_path: Path, name: str, unique_id: str,
+                 image_paths: list[str], captured_frame: np.ndarray | None) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.name = name
+        self.unique_id = unique_id
+        self.image_paths = image_paths
+        self.captured_frame = captured_frame
+        self.success_message = ""
+        self.error_message = ""
+
+    def run(self) -> None:
+        db = None
+        try:
+            from modules.face import FaceRecognition
+
+            db = FaceDB(self.db_path)
+            module = FaceRecognition(db)
+            if not module.available:
+                raise RuntimeError(module._model_error or "Face recognition models are unavailable.")
+            embeddings = []
+            for image_path in self.image_paths:
+                image = cv2.imread(image_path)
+                if image is None:
+                    raise ValueError(f"Could not read image: {image_path}")
+                embedding = module.embed_face(image)
+                if embedding is None:
+                    raise ValueError(f"No usable face found in {Path(image_path).name}.")
+                embeddings.append(embedding)
+            if self.captured_frame is not None:
+                embedding = module.embed_face(self.captured_frame)
+                if embedding is None:
+                    raise ValueError("No usable face found in the captured camera frame.")
+                embeddings.append(embedding)
+            if not embeddings:
+                raise ValueError("Select at least one face image or capture a live frame.")
+            db.register_person(
+                self.name,
+                self.unique_id,
+                embeddings,
+                embedding_model="opencv_sface_2021dec",
+            )
+            self.success_message = (
+                f"Registered {self.name} ({self.unique_id}) with {len(embeddings)} sample(s)."
+            )
+        except Exception as exc:
+            self.error_message = str(exc)
+        finally:
+            if db is not None:
+                db.close()
+
+
+class FaceEnrollmentDialog(QDialog):
+    """Consent-based enrollment; images are embedded and not retained."""
+
+    def __init__(self, db: FaceDB, captured_frame: np.ndarray | None, parent=None) -> None:
+        super().__init__(parent)
+        self.db = db
+        self.captured_frame = captured_frame.copy() if captured_frame is not None else None
+        self.image_paths: list[str] = []
+        self.worker: FaceEnrollmentWorker | None = None
+        self.setWindowTitle("Register Individual Face")
+        self.setMinimumWidth(440)
+        self.setStyleSheet(DARK_QSS if parent.config.theme == "dark" else LIGHT_QSS)
+        layout = QVBoxLayout(self)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Full name")
+        self.id_edit = QLineEdit()
+        self.id_edit.setPlaceholderText("Unique ID (employee/student/etc.)")
+        layout.addWidget(QLabel("Name"))
+        layout.addWidget(self.name_edit)
+        layout.addWidget(QLabel("Unique ID"))
+        layout.addWidget(self.id_edit)
+
+        self.images_label = QLabel("No uploaded images")
+        self.images_label.setWordWrap(True)
+        choose = QPushButton("Choose face images…")
+        choose.clicked.connect(self.choose_images)
+        layout.addWidget(choose)
+        layout.addWidget(self.images_label)
+        capture = QPushButton("Capture current camera frame")
+        capture.clicked.connect(self.capture_current_frame)
+        layout.addWidget(capture)
+        capture_status = "Live frame ready" if self.captured_frame is not None else "No live frame captured"
+        self.capture_label = QLabel(capture_status)
+        self.capture_label.setWordWrap(True)
+        layout.addWidget(self.capture_label)
+
+        self.consent_check = QCheckBox(
+            "I am authorized to enroll this person and have their explicit consent "
+            "to process these biometric images."
+        )
+        layout.addWidget(self.consent_check)
+        buttons = QHBoxLayout()
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        self.enroll_button = QPushButton("Enroll")
+        self.enroll_button.setObjectName("primary")
+        self.enroll_button.clicked.connect(self.enroll)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.enroll_button)
+        layout.addLayout(buttons)
+
+    def choose_images(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select face images", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)"
+        )
+        if paths:
+            self.image_paths = paths
+            self.images_label.setText(f"{len(paths)} image(s) selected")
+
+    def capture_current_frame(self) -> None:
+        frame = getattr(self.parent(), "last_frame", None)
+        if frame is None:
+            QMessageBox.warning(self, "Capture face", "Start a camera or video source first.")
+            return
+        self.captured_frame = frame.copy()
+        self.capture_label.setText("Captured frame ready for enrollment")
+
+    def enroll(self) -> None:
+        name, unique_id = self.name_edit.text().strip(), self.id_edit.text().strip()
+        if not name or not unique_id:
+            QMessageBox.warning(self, "Registration", "Enter both a name and a unique ID.")
+            return
+        if not self.consent_check.isChecked():
+            QMessageBox.warning(self, "Consent required", "Confirm enrollment authority and explicit consent.")
+            return
+        if not self.image_paths and self.captured_frame is None:
+            QMessageBox.warning(self, "Images required", "Choose face images or start the camera before enrollment.")
+            return
+        self.enroll_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        self.worker = FaceEnrollmentWorker(
+            self.db.path, name, unique_id, list(self.image_paths), self.captured_frame
+        )
+        self.worker.finished.connect(self.on_worker_finished)
+        self.worker.start()
+
+    @Slot()
+    def on_worker_finished(self) -> None:
+        if self.worker is None:
+            return
+        if self.worker.error_message:
+            self.enroll_button.setEnabled(True)
+            self.cancel_button.setEnabled(True)
+            QMessageBox.critical(self, "Registration failed", self.worker.error_message)
+            return
+        message = self.worker.success_message
+        if self.parent() is not None:
+            self.parent().statusBar().showMessage(message, 6000)
+        QMessageBox.information(self, "Registration complete", message)
+        self.accept()
+
+    def reject(self) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            return
+        super().reject()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if self.worker is not None and self.worker.isRunning():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+
 class FaceDBManagerDialog(QDialog):
     """Interactive management tool for Face Identity Database."""
 
@@ -500,11 +685,14 @@ class FaceDBManagerDialog(QDialog):
         layout.addWidget(self.list_widget)
 
         btn_layout = QHBoxLayout()
+        self.btn_history = QPushButton("Recognition History")
+        self.btn_history.clicked.connect(self.show_history)
         self.btn_delete = QPushButton("Delete Selected")
         self.btn_delete.clicked.connect(self.delete_selected)
         self.btn_close = QPushButton("Close")
         self.btn_close.clicked.connect(self.accept)
 
+        btn_layout.addWidget(self.btn_history)
         btn_layout.addWidget(self.btn_delete)
         btn_layout.addStretch(1)
         btn_layout.addWidget(self.btn_close)
@@ -515,14 +703,17 @@ class FaceDBManagerDialog(QDialog):
     def load_identities(self) -> None:
         self.list_widget.clear()
         query = self.search_edit.text().strip().lower()
-        for name in self.db.names():
-            if not query or query in name.lower():
-                self.list_widget.addItem(name)
+        for record in self.db.identity_records(query):
+            item = QListWidgetItem(
+                f"{record['name']}  ·  {record['unique_id']}  ·  {record['sample_count']} samples"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, record["name"])
+            self.list_widget.addItem(item)
 
     def delete_selected(self) -> None:
         item = self.list_widget.currentItem()
         if item:
-            name = item.text()
+            name = item.data(Qt.ItemDataRole.UserRole)
             reply = QMessageBox.question(
                 self, "Delete Face", f"Are you sure you want to delete '{name}'?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
@@ -530,6 +721,16 @@ class FaceDBManagerDialog(QDialog):
             if reply == QMessageBox.StandardButton.Yes:
                 self.db.remove(name)
                 self.load_identities()
+
+    def show_history(self) -> None:
+        lines = [
+            f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(row['recognized_at']))}  "
+            f"{row['name']}  {row['confidence']:.0%}"
+            for row in self.db.history(100)
+        ]
+        QMessageBox.information(
+            self, "Recognition History", "\n".join(lines) if lines else "No history recorded."
+        )
 
 
 class PlateLogDialog(QDialog):
@@ -812,6 +1013,7 @@ class MainWindow(QMainWindow):
         cols = 2
         for i, key in enumerate(keys):
             check = QCheckBox(AI_MODULES[key])
+            check.setChecked(key in self.config.enabled_modules)
             check.stateChanged.connect(self._make_module_toggle(key))
             self.module_checks[key] = check
             ai_grid.addWidget(check, i // cols, i % cols)
@@ -824,7 +1026,7 @@ class MainWindow(QMainWindow):
         self.mode_checks: dict[str, QCheckBox] = {}
         for i, mode in enumerate(MODES):
             check = QCheckBox(mode)
-            check.setChecked(mode == "Objects")
+            check.setChecked(mode in self.config.enabled_modes)
             check.stateChanged.connect(self._make_mode_toggle(mode))
             self.mode_checks[mode] = check
             mode_grid.addWidget(check, i // 2, i % 2)
@@ -1335,6 +1537,11 @@ class MainWindow(QMainWindow):
             lines.append("  ".join(f"{k}×{v}" for k, v in sorted(info["counts"].items())))
         if "faces" in info:
             lines.append(f"Faces: {info['faces']}")
+        face_status = info.get("face_recognition", {})
+        if face_status.get("error"):
+            lines.append(f"Face recognition unavailable: {face_status['error']}")
+        elif face_status.get("recognition"):
+            lines.append(face_status["recognition"])
         if "signs" in info and info["signs"] != "—":
             lines.append(f"Signs: {info['signs']}")
         self.metric_extra.setText("\n".join(lines) if lines else "—")
@@ -1385,23 +1592,8 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def register_face(self) -> None:
-        if self.last_frame is None:
-            QMessageBox.information(self, "Register face", "Start the camera first.")
-            return
-        name, ok = QInputDialog.getText(self, "Register face", "Enter person's name:")
-        if not ok or not name.strip():
-            return
-        try:
-            module = get_module("face_recognition")
-            embedding = module.embed_face(self.last_frame)
-            if embedding is None:
-                QMessageBox.warning(self, "Register face", "No face found in the current frame.")
-                return
-            self.face_db.register(name.strip(), embedding)
-            self.statusBar().showMessage(f"Registered {name.strip()}")
-        except Exception as exc:  # pragma: no cover
-            log.exception("Face registration failed")
-            QMessageBox.critical(self, "Register face", str(exc))
+        dialog = FaceEnrollmentDialog(self.face_db, self.last_frame, self)
+        dialog.exec()
 
     @Slot()
     def scan_document(self) -> None:

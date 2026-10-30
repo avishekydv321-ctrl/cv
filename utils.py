@@ -3,6 +3,11 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
+import shutil
+import ssl
+import subprocess
+import tempfile
 import time
 import urllib.request
 from collections import deque
@@ -52,19 +57,48 @@ def download_file(url: str, destination: Path, timeout: int = 60) -> Optional[Pa
         return destination
     destination.parent.mkdir(parents=True, exist_ok=True)
     log = logging.getLogger("utils.download")
+    temporary_path = None
     try:
         log.info("Downloading %s -> %s", url, destination)
         req = urllib.request.Request(url, headers={"User-Agent": "VisionSuite/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as response, destination.open("wb") as out:
-            while True:
-                chunk = response.read(1 << 16)
-                if not chunk:
-                    break
-                out.write(chunk)
+        try:
+            import certifi
+
+            context = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            context = ssl.create_default_context()
+        with tempfile.NamedTemporaryFile(
+            dir=destination.parent, prefix=f".{destination.name}.", delete=False
+        ) as out:
+            temporary_path = Path(out.name)
+        if shutil.which("curl"):
+            subprocess.run(
+                ["curl", "--fail", "--location", "--silent", "--show-error",
+                 "--max-time", str(timeout), "--output", str(temporary_path), url],
+                check=True,
+                timeout=timeout + 5,
+                capture_output=True,
+                text=True,
+            )
+        else:
+            with urllib.request.urlopen(req, timeout=timeout, context=context) as response:
+                with temporary_path.open("wb") as out:
+                    while True:
+                        chunk = response.read(1 << 16)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+        if temporary_path.stat().st_size == 0:
+            raise OSError("downloaded file is empty")
+        os.replace(temporary_path, destination)
+        temporary_path = None
         return destination
     except Exception as exc:  # pragma: no cover - depends on network
         log.warning("Download failed for %s: %s", url, exc)
         return None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def ensure_model(filename: str, url: str) -> Optional[Path]:

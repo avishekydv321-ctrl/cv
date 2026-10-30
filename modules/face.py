@@ -1,14 +1,11 @@
 """Face-related AI modules.
 
-Face recognition uses MediaPipe Tasks face detection + face_recognition
-embeddings (fallback to a MediaPipe Tasks-derived embedding when
-face_recognition is missing). Mask, emotion and age/gender are all served by a
-single lightweight MobileNet-style classifier that runs through ONNX Runtime
-when available, and gracefully reports itself unavailable otherwise.
+Individual face identity uses OpenCV Zoo YuNet detection + SFace embeddings.
+Mask, emotion and age/gender are served by ONNX Runtime classifiers when
+their optional model files are available.
 
-All face detection is delegated to the shared Tasks API helper in
-``detector.py`` (``_get_face_detector``), so these modules work with the modern
-``mediapipe>=1.0`` that no longer ships the legacy ``mediapipe.solutions`` API.
+The shared MediaPipe Tasks detector remains available for the face mesh and
+other existing face-analysis modules.
 """
 from __future__ import annotations
 
@@ -21,7 +18,7 @@ import numpy as np
 
 from detector import _get_face_detector
 from face_db import FaceDB
-from modules.base import BaseModule, DEVICE, ModuleResult, ensure_model, load_onnx
+from modules.base import BaseModule, ModuleResult, ensure_model, load_onnx
 from utils import Detection
 
 
@@ -37,6 +34,15 @@ log = logging.getLogger("modules.face")
 _MASK_URL = "https://github.com/elyase/face-mask-detection/releases/download/v1.0/mask_model.onnx"
 _EMOTION_URL = "https://github.com/onnx/models/raw/main/vision/body_analysis/emotion_ferplus/model/emotion-ferplus-8.onnx"
 _AGEGEN_URL = "https://github.com/onnx/models/raw/main/vision/body_analysis/age_gender/model/age_gender.onnx"
+_FACE_DETECTOR_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/"
+    "face_detection_yunet_2023mar.onnx"
+)
+_FACE_EMBEDDING_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/"
+    "face_recognition_sface_2021dec.onnx"
+)
+_FACE_EMBEDDING_MODEL = "opencv_sface_2021dec"
 
 EMOTIONS = ("neutral", "happy", "sad", "surprise", "anger")
 
@@ -50,103 +56,114 @@ class FaceRecognition(BaseModule):
     def __init__(self, db: Optional[FaceDB] = None) -> None:
         super().__init__()
         self.db = db or FaceDB()
-        self._mp_face = None
-        self._fr = None
+        self._detector = None
+        self._recognizer = None
+        self._model_error = ""
+        self._last_history: dict[str, float] = {}
 
     # -- backends ------------------------------------------------------
     def _check_available(self) -> bool:
-        return self._ensure() is not None
+        return self._ensure()
 
-    def _ensure(self):
-        if self._fr is None:
-            try:
-                import face_recognition  # type: ignore
+    def _ensure(self) -> bool:
+        if self._detector is not None and self._recognizer is not None:
+            return True
+        if self._model_error:
+            return False
+        try:
+            detector_path = ensure_model(_FACE_DETECTOR_URL, "face_detection_yunet_2023mar.onnx")
+            embedding_path = ensure_model(
+                _FACE_EMBEDDING_URL, "face_recognition_sface_2021dec.onnx"
+            )
+            if detector_path is None or embedding_path is None:
+                raise RuntimeError("Could not download the YuNet/SFace face models.")
+            self._detector = cv2.FaceDetectorYN_create(
+                str(detector_path), "", (320, 320), 0.6, 0.3, 5000
+            )
+            self._recognizer = cv2.FaceRecognizerSF_create(str(embedding_path), "")
+            return True
+        except Exception as exc:
+            self._model_error = str(exc)
+            log.warning("Individual face recognition unavailable: %s", exc)
+            return False
 
-                self._fr = face_recognition
-            except Exception:
-                self._fr = None
-        # Use the shared Tasks face detector instead of legacy mp.solutions.
-        face_det = _get_face_detector()
-        self._mp_face = face_det if face_det.available else None
-        return self._fr
+    def _extract_faces(
+        self, frame: np.ndarray
+    ) -> list[tuple[tuple[int, int, int, int], list[float]]]:
+        """Return each face box and its normalized SFace embedding."""
+        if not self._ensure():
+            return []
+        height, width = frame.shape[:2]
+        self._detector.setInputSize((width, height))
+        _, faces = self._detector.detect(frame)
+        if faces is None:
+            return []
+        extracted = []
+        for face in faces:
+            x, y, box_width, box_height = (int(value) for value in face[:4])
+            x1, y1 = max(0, x), max(0, y)
+            x2, y2 = min(width, x + box_width), min(height, y + box_height)
+            if x2 - x1 < 20 or y2 - y1 < 20:
+                continue
+            aligned = self._recognizer.alignCrop(frame, face)
+            feature = self._recognizer.feature(aligned).reshape(-1).astype(np.float32)
+            norm = float(np.linalg.norm(feature))
+            if norm <= 1e-8:
+                continue
+            feature /= norm
+            extracted.append(((x1, y1, x2, y2), feature.astype(float).tolist()))
+        return extracted
 
     # -- API used by the GUI ------------------------------------------
     def embed_face(self, frame: np.ndarray) -> Optional[list[float]]:
-        """Return the embedding of the largest face in the frame (or None)."""
-        if self._ensure() is None:
+        """Return the largest face's SFace embedding, or None when no face exists."""
+        faces = self._extract_faces(frame)
+        if not faces:
             return None
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        if hasattr(self._fr, "face_locations"):  # classic face_recognition model
-            locs = self._fr.face_locations(rgb)
-            if not locs:
-                return None
-            # largest box
-            locs.sort(key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
-            encs = self._fr.face_encodings(rgb, locs[:1])
-            return list(encs[0]) if encs else None
-
-        # Tasks face detector fallback: crop largest face for embedding.
-        face_boxes = _faces_in_frame(frame)
-        if not face_boxes:
-            return None
-        (x1, y1, x2, y2), *_ = sorted(  # largest box
-            face_boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
-        crop = cv2.resize(frame[y1:y2, x1:x2], (96, 96))
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) / 255.0
-        # Deterministic hand-crafted descriptor: 128 bins of oriented edges.
-        hist = cv2.HOGDescriptor((48, 48), (16, 16), (8, 8), (8, 8), 9).compute(
-            cv2.resize(gray, (64, 64))
+        _, embedding = max(
+            faces,
+            key=lambda item: (item[0][2] - item[0][0]) * (item[0][3] - item[0][1]),
         )
-        embedding = hist.flatten().astype(float).tolist()[:128]
-        if len(embedding) < 128:
-            embedding.extend([0.0] * (128 - len(embedding)))
         return embedding
 
-    def _match(self, embedding: list[float]) -> tuple[Optional[str], float]:
-        if not self.db.embeddings():
-            return None, 0.0
-        best_name, best_score = None, -1.0
-        for name, known in self.db.embeddings():
-            score = float(np.dot(embedding, known) / (
-                np.linalg.norm(embedding) * np.linalg.norm(known) + 1e-6
-            ))
+    def _match(self, embedding: list[float]) -> tuple[Optional[str], Optional[str], float]:
+        query = np.asarray(embedding, dtype=np.float32)
+        best_name, best_id, best_score = None, None, -1.0
+        for name, unique_id, known_values in self.db.samples_with_ids(_FACE_EMBEDDING_MODEL):
+            known = np.asarray(known_values, dtype=np.float32)
+            if known.shape != query.shape:
+                continue
+            score = float(np.dot(query, known) / (np.linalg.norm(known) * np.linalg.norm(query) + 1e-8))
             if score > best_score:
-                best_name, best_score = name, score
-        return best_name, best_score
+                best_name, best_id, best_score = name, unique_id, score
+        return best_name, best_id, max(0.0, best_score)
 
     # -- pipeline ------------------------------------------------------
     def process(self, frame: np.ndarray, config: Any) -> ModuleResult:
         t0 = time.perf_counter()
         result = ModuleResult()
-        if self._ensure() is None:
+        if not self._ensure():
             result.info["available"] = False
+            result.info["error"] = self._model_error
             return result
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        if hasattr(self._fr, "face_locations"):
-            locs = self._fr.face_locations(rgb)
-            encs = self._fr.face_encodings(rgb, locs)
-        else:
-            # Tasks face detector fallback: use (top, right, bottom, left) boxes.
-            boxes = _faces_in_frame(frame)
-            locs = [(y1, x2, y2, x1) for x1, y1, x2, y2 in boxes]
-            encs = [self.embed_face(frame)] * len(locs) if locs else []
-
         names = []
-        for (top, right, bottom, left), enc in zip(locs, encs):
-            if enc is None:
-                continue
-            name, score = self._match(enc)
-            if score is None:
-                score = 0.0
-            if name is None or score < 0.35:
-                name, score = "Unknown", max(score, 0.0)
+        threshold = float(getattr(config, "face_similarity_threshold", 0.45))
+        for box, embedding in self._extract_faces(frame):
+            name, unique_id, score = self._match(embedding)
+            if name is None or score < threshold:
+                name, unique_id = "Unknown Person", None
                 result.alerts.append("Unknown face detected")
             else:
-                self.db.log_recognition(name, score)
+                if getattr(config, "face_history_enabled", False):
+                    now = time.monotonic()
+                    if now - self._last_history.get(unique_id, 0.0) >= 2.0:
+                        self.db.log_recognition(name, score)
+                        self._last_history[unique_id] = now
                 result.info.setdefault("recognized", []).append(name)
-            box = (left, top, right, bottom)
-            result.detections.append(Detection(f"face:{name}", max(score, 0.1), box, "face"))
+            result.detections.append(
+                Detection(name, score, box, "individual_face", color=self.color)
+            )
             names.append(f"{name} ({score:.0%})")
         result.info["recognition"] = ", ".join(names) or "No faces"
         result.inference_ms = (time.perf_counter() - t0) * 1000.0

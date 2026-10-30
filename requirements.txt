@@ -1,14 +1,12 @@
 # VisionSuite - Python 3.9+
 # Core dependencies (required to run the app).
 #
-# NOTE: mediapipe>=1.0 uses the modern Tasks API (mediapipe.tasks). The legacy
-# mediapipe.solutions API was removed in 1.0, so versions below 1.0 are NOT
-# compatible with this codebase. All MediaPipe backends use the Tasks API and
-# auto-download the small .task model bundles into models/ on first use.
+# MediaPipe 0.10.35 provides the Tasks API used here and avoids a native
+# Metal initialization crash observed with mediapipe 1.0.1 on macOS.
 PySide6>=6.6.0
-opencv-python>=4.9.0
+opencv-contrib-python>=4.9.0
 numpy>=1.26.0
-mediapipe>=1.0.0
+mediapipe==0.10.35
 ultralytics>=8.2.0
 torch>=2.2.0
 matplotlib>=3.8.0
@@ -46,14 +44,13 @@ python-dotenv>=1.0.0
 # dependency or model is missing, so the app still runs without them.
 # ---------------------------------------------------------------------------
 
-# Face recognition (identity DB) — enables the Face Recognition module.
-face-recognition>=1.3.0
+# Individual face recognition uses the OpenCV contrib YuNet/SFace APIs and
+# downloads its ONNX model weights into models/ on first use; dlib is not needed.
 
 # Vehicle tracking & counting — ByteTrack tracker (optional, uses YOLO).
 # pip install bytetrack
 
 # Plant disease classifier weights (optional, downloaded on demand).
 # ---
-# Install everything from the optional section with:
-#   pip install -r requirements.txt     # core only
-#   pip install face-recognition easyocr bytetrack
+# Install optional extras separately when needed, e.g.:
+#   pip install easyocr bytetrack
